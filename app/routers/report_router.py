@@ -11,6 +11,8 @@ from app.schemas.report import (
     NotificationResponse,
     TrendSummary,
     NotificationAckRequest,
+    NotificationSessionItem,
+    NotificationQueryRequest,
 )
 from app.services.report_service import (
     generate_daily_report,
@@ -28,6 +30,9 @@ from app.services.notification_service import (
     get_driver_pending_count,
     mark_driver_notifications_read,
     mark_notifications_ack,
+    get_all_notifications,
+    get_notification_sessions,
+    export_notifications_csv,
 )
 from app.utils.notification_manager import notification_manager
 from app.config import NOTIFICATION_ROLES
@@ -36,7 +41,11 @@ router = APIRouter(tags=["报表与通知"])
 
 
 @router.post("/reports/generate", response_model=List[OperationReportResponse])
-def generate_report(date: Optional[str] = None, station_code: Optional[str] = None, db: Session = Depends(get_db)):
+def generate_report(
+    date: Optional[str] = None,
+    station_code: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
     return generate_daily_report(db, date, station_code)
 
 
@@ -45,11 +54,12 @@ def list_reports(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = Query(None),
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db),
 ):
-    return get_reports(db, start_date, end_date, station_code, skip, limit)
+    return get_reports(db, start_date, end_date, station_code, station_codes, skip, limit)
 
 
 @router.get("/reports/trend", response_model=TrendSummary)
@@ -57,9 +67,10 @@ def report_trend(
     start_date: str,
     end_date: str,
     station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = Query(None),
     db: Session = Depends(get_db),
 ):
-    return get_trend_summary(db, start_date, end_date, station_code)
+    return get_trend_summary(db, start_date, end_date, station_code, station_codes)
 
 
 @router.post("/reports/export")
@@ -75,13 +86,84 @@ def export_report(request: ReportExportRequest, db: Session = Depends(get_db)):
 def list_notifications(
     role: str = Query(..., description=f"角色: {', '.join(NOTIFICATION_ROLES)}"),
     delivery_status: Optional[str] = Query(None, description="pending/delivered/read"),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    is_read: Optional[bool] = None,
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db),
 ):
     if role not in NOTIFICATION_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {NOTIFICATION_ROLES}")
-    return get_notifications_by_role(db, role, delivery_status, skip, limit)
+    return get_notifications_by_role(
+        db, role, delivery_status, start_date, end_date, notification_type, is_read, skip, limit
+    )
+
+
+@router.get("/notifications/all", response_model=List[NotificationResponse])
+def list_all_notifications(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    is_read: Optional[bool] = None,
+    recipient_role: Optional[str] = None,
+    recipient_name: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    return get_all_notifications(
+        db, start_date, end_date, notification_type, delivery_status,
+        is_read, recipient_role, recipient_name, skip, limit
+    )
+
+
+@router.post("/notifications/query", response_model=List[NotificationResponse])
+def query_notifications(request: NotificationQueryRequest, db: Session = Depends(get_db)):
+    return get_all_notifications(
+        db,
+        request.start_date, request.end_date,
+        request.notification_type, request.delivery_status,
+        request.is_read, request.recipient_role, request.recipient_name,
+        skip=0, limit=200,
+    )
+
+
+@router.get("/notifications/sessions", response_model=List[NotificationSessionItem])
+def list_notification_sessions(
+    role: Optional[str] = None,
+    recipient_name: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    return get_notification_sessions(
+        db, role, recipient_name, start_date, end_date, notification_type, skip, limit
+    )
+
+
+@router.get("/notifications/export")
+def notifications_export(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    is_read: Optional[bool] = None,
+    recipient_role: Optional[str] = None,
+    recipient_name: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    result = export_notifications_csv(
+        db, start_date, end_date, notification_type, delivery_status,
+        is_read, recipient_role, recipient_name
+    )
+    headers = {"Content-Disposition": f"attachment; filename={result['filename']}"}
+    return PlainTextResponse(content=result["content"], media_type="text/csv", headers=headers)
 
 
 @router.get("/notifications/unread-count")
@@ -118,11 +200,17 @@ def batch_ack(request: NotificationAckRequest, db: Session = Depends(get_db)):
 def list_driver_notifications(
     driver_name: str,
     delivery_status: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    is_read: Optional[bool] = None,
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db),
 ):
-    return get_notifications_by_driver_name(db, driver_name, delivery_status, skip, limit)
+    return get_notifications_by_driver_name(
+        db, driver_name, delivery_status, start_date, end_date, notification_type, is_read, skip, limit
+    )
 
 
 @router.get("/drivers/{driver_name}/notifications/unread-count")

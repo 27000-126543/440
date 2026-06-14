@@ -27,6 +27,7 @@ class ReportExportRequest(BaseModel):
     start_date: str
     end_date: str
     station_code: Optional[str] = None
+    station_codes: Optional[List[str]] = None
 
 
 class DailyTrendItem(BaseModel):
@@ -37,6 +38,17 @@ class DailyTrendItem(BaseModel):
     marshalling_efficiency: float
     avg_stay_time: float
     maintenance_completion_rate: float
+    total_maintenance: int
+    total_containers_handled: int
+
+
+class DailyTotalTrendItem(BaseModel):
+    report_date: str
+    total_arrived: int
+    total_departed: int
+    avg_marshalling_efficiency: float
+    avg_stay_time: float
+    avg_maintenance_completion_rate: float
     total_maintenance: int
     total_containers_handled: int
 
@@ -53,6 +65,7 @@ class TrendSummary(BaseModel):
     total_maintenance: int
     total_containers_handled: int
     daily_trend: List[DailyTrendItem]
+    daily_total_trend: List[DailyTotalTrendItem]
 
 
 class NotificationBase(BaseModel):
@@ -91,6 +104,41 @@ class NotificationAckRequest(BaseModel):
     ack_type: str = "delivered"
 
 
+class NotificationQueryRequest(BaseModel):
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    notification_type: Optional[str] = None
+    delivery_status: Optional[str] = None
+    is_read: Optional[bool] = None
+    recipient_role: Optional[str] = None
+    recipient_name: Optional[str] = None
+    station_codes: Optional[List[str]] = None
+
+
+class NotificationSessionItem(BaseModel):
+    related_type: Optional[str]
+    related_id: Optional[int]
+    subject: str
+    total_count: int
+    pending_count: int
+    delivered_count: int
+    read_count: int
+    first_at: datetime
+    latest_at: datetime
+    latest_title: str
+    notifications: List[NotificationResponse]
+
+
+class DispatchVehicleItem(BaseModel):
+    vehicle_id: int
+    vehicle_no: str
+    vehicle_type: str
+    destination: str
+    arrived_at: Optional[datetime] = None
+    departed_at: Optional[datetime] = None
+    stay_hours: Optional[float] = None
+
+
 class DispatchFlowStep(BaseModel):
     step: str
     status: str
@@ -107,3 +155,4 @@ class DispatchFlowResponse(BaseModel):
     station_code: Optional[str] = None
     created_at: datetime
     flow: List[DispatchFlowStep]
+    vehicles: List[DispatchVehicleItem]

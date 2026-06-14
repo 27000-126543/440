@@ -13,7 +13,11 @@ from app.schemas.dispatch import (
     TrainDispatchCreate,
     BrakeTestRequest,
 )
-from app.schemas.report import DispatchFlowResponse, DispatchFlowStep
+from app.schemas.report import (
+    DispatchFlowResponse,
+    DispatchFlowStep,
+    DispatchVehicleItem,
+)
 from app.services.notification_service import push_status_notification, push_dispatch_notification
 
 
@@ -149,17 +153,6 @@ def issue_departure_command(db: Session, dispatch_id: int, driver: str) -> dict:
     dispatch.departure_time = now
     dispatch.departure_issued_at = now
 
-    plan = db.query(MarshallingPlan).filter(MarshallingPlan.id == dispatch.plan_id).first()
-    if plan:
-        plan.status = "departed"
-
-        entries = db.query(MarshallingEntry).filter(MarshallingEntry.plan_id == plan.id).all()
-        for entry in entries:
-            vehicle = db.query(Vehicle).filter(Vehicle.id == entry.vehicle_id).first()
-            if vehicle:
-                vehicle.status = "departed"
-                vehicle.departed_at = now
-
     db.commit()
     db.refresh(dispatch)
 
@@ -172,7 +165,7 @@ def issue_departure_command(db: Session, dispatch_id: int, driver: str) -> dict:
         dispatch_id=dispatch.id,
     )
 
-    return {"success": True, "dispatch": dispatch, "message": "发车指令已下发"}
+    return {"success": True, "dispatch": dispatch, "message": "发车指令已下发，等待司机确认及实际发车"}
 
 
 def driver_confirm_departure(db: Session, dispatch_id: int, driver_name: str) -> dict:
@@ -213,15 +206,31 @@ def record_actual_departure(db: Session, dispatch_id: int) -> dict:
     if dispatch.status not in ("departure_issued", "driver_confirmed", "departed"):
         return {"success": False, "message": "请先下发发车指令"}
 
-    dispatch.actual_departure_time = datetime.utcnow()
+    now = datetime.utcnow()
+    dispatch.actual_departure_time = now
     dispatch.status = "departed"
+
+    plan = db.query(MarshallingPlan).filter(MarshallingPlan.id == dispatch.plan_id).first()
+    if plan:
+        plan.status = "departed"
+
+        entries = db.query(MarshallingEntry).filter(MarshallingEntry.plan_id == plan.id).all()
+        for entry in entries:
+            vehicle = db.query(Vehicle).filter(Vehicle.id == entry.vehicle_id).first()
+            if vehicle:
+                vehicle.status = "departed"
+                vehicle.departed_at = now
+
     db.commit()
     db.refresh(dispatch)
 
     push_status_notification(
         db,
         title=f"列车已实际发车 - {dispatch.train_no}",
-        content=f"列车 {dispatch.train_no}（司机：{dispatch.driver}）已实际发车，发车编号 {dispatch.dispatch_no}。",
+        content=(
+            f"列车 {dispatch.train_no}（司机：{dispatch.driver}）已于 "
+            f"{now.strftime('%Y-%m-%d %H:%M:%S')} 实际发车，发车编号 {dispatch.dispatch_no}。"
+        ),
         notification_type="dispatch",
         related_type="dispatch",
         related_id=dispatch.id,
@@ -243,7 +252,36 @@ def get_train_dispatches(
     return query.order_by(TrainDispatch.created_at.desc()).offset(skip).limit(limit).all()
 
 
-def get_dispatch_flow(db: Session, dispatch_id: Optional[int] = None, train_no: Optional[str] = None) -> Optional[DispatchFlowResponse]:
+def _get_dispatch_vehicles(db: Session, dispatch: TrainDispatch) -> List[DispatchVehicleItem]:
+    entries = (
+        db.query(MarshallingEntry)
+        .filter(MarshallingEntry.plan_id == dispatch.plan_id)
+        .order_by(MarshallingEntry.sequence)
+        .all()
+    )
+    vehicles: List[DispatchVehicleItem] = []
+    for e in entries:
+        v = db.query(Vehicle).filter(Vehicle.id == e.vehicle_id).first()
+        if not v:
+            continue
+        stay_hours = None
+        if v.arrived_at and v.departed_at:
+            stay_hours = round((v.departed_at - v.arrived_at).total_seconds() / 3600, 2)
+        vehicles.append(DispatchVehicleItem(
+            vehicle_id=v.id,
+            vehicle_no=v.vehicle_no,
+            vehicle_type=v.vehicle_type,
+            destination=v.destination,
+            arrived_at=v.arrived_at,
+            departed_at=v.departed_at,
+            stay_hours=stay_hours,
+        ))
+    return vehicles
+
+
+def get_dispatch_flow(
+    db: Session, dispatch_id: Optional[int] = None, train_no: Optional[str] = None
+) -> Optional[DispatchFlowResponse]:
     query = db.query(TrainDispatch)
     if dispatch_id:
         query = query.filter(TrainDispatch.id == dispatch_id)
@@ -268,16 +306,22 @@ def get_dispatch_flow(db: Session, dispatch_id: Optional[int] = None, train_no: 
         remark=f"创建发车编号：{dispatch.dispatch_no}",
     ))
 
+    seq_status = "completed" if dispatch.sequence_checked else "pending"
+    if dispatch.status == "sequence_failed":
+        seq_status = "failed"
     flow.append(DispatchFlowStep(
         step="车辆顺序校验",
-        status="completed" if dispatch.sequence_checked else "pending",
+        status=seq_status,
         timestamp=dispatch.updated_at if dispatch.sequence_checked else None,
         remark="按编组计划校验车辆序号连续性",
     ))
 
+    brake_status = "completed" if dispatch.brake_test_passed else "pending"
+    if dispatch.status == "brake_failed":
+        brake_status = "failed"
     flow.append(DispatchFlowStep(
         step="制动测试",
-        status="completed" if dispatch.brake_test_passed else ("failed" if dispatch.status == "brake_failed" else "pending"),
+        status=brake_status,
         timestamp=dispatch.updated_at if dispatch.brake_test_passed else None,
         remark="列车制动安全测试",
     ))
@@ -297,11 +341,13 @@ def get_dispatch_flow(db: Session, dispatch_id: Optional[int] = None, train_no: 
     ))
 
     flow.append(DispatchFlowStep(
-        step="实际发车",
+        step="实际发车驶离场站",
         status="completed" if dispatch.actual_departure_time else "pending",
         timestamp=dispatch.actual_departure_time,
-        remark="列车驶离场站的实际时间",
+        remark="日报/趋势统计口径以此时间为准",
     ))
+
+    vehicles = _get_dispatch_vehicles(db, dispatch)
 
     return DispatchFlowResponse(
         dispatch_id=dispatch.id,
@@ -312,6 +358,7 @@ def get_dispatch_flow(db: Session, dispatch_id: Optional[int] = None, train_no: 
         station_code=station_code,
         created_at=dispatch.created_at,
         flow=flow,
+        vehicles=vehicles,
     )
 
 

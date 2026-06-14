@@ -1,10 +1,11 @@
 import asyncio
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 from app.models.models import Notification
-from app.schemas.report import NotificationCreate
+from app.schemas.report import NotificationCreate, NotificationSessionItem, NotificationResponse
 from datetime import datetime
 from app.utils.notification_manager import notification_manager
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 
 def create_notification(db: Session, notification_data: NotificationCreate) -> Notification:
@@ -35,18 +36,17 @@ def _serialize_notification(notif: Notification) -> dict:
     }
 
 
-async def _broadcast_to_websocket(notification: Notification, db_session_maker=None):
+async def _broadcast_to_websocket(notification: Notification):
     try:
         message = _serialize_notification(notification)
-        delivered = False
         if notification.recipient_role == "driver" and notification.recipient_name:
-            delivered = await notification_manager.send_to_recipient(
+            await notification_manager.send_to_recipient(
                 "driver", notification.recipient_name, message
             )
         else:
-            delivered = await notification_manager.send_to_role(notification.recipient_role, message)
+            await notification_manager.send_to_role(notification.recipient_role, message)
     except Exception:
-        delivered = False
+        pass
 
 
 def _run_async(coro):
@@ -82,7 +82,6 @@ def push_status_notification(
     notifications = []
     for role in roles:
         name = recipient_name if role == "driver" else None
-        is_direct = role == "driver" and name
         delivery = "delivered" if notification_manager.is_connected(role, recipient_name=name) else "pending"
 
         notif_data = NotificationCreate(
@@ -135,25 +134,219 @@ def push_dispatch_notification(
     )
 
 
-def get_notifications_by_role(
-    db: Session, role: str, delivery_status: str = None, skip: int = 0, limit: int = 50
-) -> list:
-    query = db.query(Notification).filter(Notification.recipient_role == role)
+def _apply_notification_filters(
+    query,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    is_read: Optional[bool] = None,
+    recipient_role: Optional[str] = None,
+    recipient_name: Optional[str] = None,
+):
+    if start_date:
+        sd = datetime.strptime(start_date, "%Y-%m-%d")
+        query = query.filter(Notification.created_at >= sd)
+    if end_date:
+        ed = datetime.strptime(end_date, "%Y-%m-%d") + __import__("datetime").timedelta(days=1)
+        query = query.filter(Notification.created_at < ed)
+    if notification_type:
+        query = query.filter(Notification.notification_type == notification_type)
     if delivery_status:
         query = query.filter(Notification.delivery_status == delivery_status)
+    if is_read is not None:
+        query = query.filter(Notification.is_read == is_read)
+    if recipient_role:
+        query = query.filter(Notification.recipient_role == recipient_role)
+    if recipient_name:
+        query = query.filter(Notification.recipient_name == recipient_name)
+    return query
+
+
+def get_notifications_by_role(
+    db: Session,
+    role: str,
+    delivery_status: str = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    is_read: Optional[bool] = None,
+    skip: int = 0,
+    limit: int = 50,
+) -> list:
+    query = db.query(Notification).filter(Notification.recipient_role == role)
+    query = _apply_notification_filters(
+        query, start_date, end_date, notification_type, delivery_status, is_read, None, None
+    )
     return query.order_by(Notification.created_at.desc()).offset(skip).limit(limit).all()
 
 
 def get_notifications_by_driver_name(
-    db: Session, driver_name: str, delivery_status: str = None, skip: int = 0, limit: int = 50
+    db: Session,
+    driver_name: str,
+    delivery_status: str = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    is_read: Optional[bool] = None,
+    skip: int = 0,
+    limit: int = 50,
 ) -> list:
     query = db.query(Notification).filter(
         Notification.recipient_role == "driver",
         Notification.recipient_name == driver_name,
     )
-    if delivery_status:
-        query = query.filter(Notification.delivery_status == delivery_status)
+    query = _apply_notification_filters(
+        query, start_date, end_date, notification_type, delivery_status, is_read, None, None
+    )
     return query.order_by(Notification.created_at.desc()).offset(skip).limit(limit).all()
+
+
+def get_all_notifications(
+    db: Session,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    is_read: Optional[bool] = None,
+    recipient_role: Optional[str] = None,
+    recipient_name: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 100,
+) -> list:
+    query = db.query(Notification)
+    query = _apply_notification_filters(
+        query, start_date, end_date, notification_type, delivery_status, is_read, recipient_role, recipient_name
+    )
+    return query.order_by(Notification.created_at.desc()).offset(skip).limit(limit).all()
+
+
+def get_notification_sessions(
+    db: Session,
+    role: Optional[str] = None,
+    recipient_name: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+) -> List[NotificationSessionItem]:
+    query = db.query(Notification)
+    if role:
+        query = query.filter(Notification.recipient_role == role)
+    if recipient_name:
+        query = query.filter(Notification.recipient_name == recipient_name)
+    query = _apply_notification_filters(
+        query, start_date, end_date, notification_type, None, None, None, None
+    )
+    all_notifs = query.order_by(Notification.created_at.desc()).all()
+
+    session_map: Dict[str, Dict[str, Any]] = {}
+    for n in all_notifs:
+        key = f"{n.related_type or 'none'}:{n.related_id or 0}"
+        if key not in session_map:
+            subject_map = {
+                "dispatch": "发车流程",
+                "maintenance": "检修流程",
+                "marshalling": "编组流程",
+                "loading": "装载流程",
+                "container": "集装箱流程",
+                "report": "运营报表",
+                "system": "系统通知",
+            }
+            subject = subject_map.get(n.related_type or (n.notification_type if n.notification_type else "system"), "业务流程")
+            if n.related_id:
+                subject = f"{subject} #{n.related_id}"
+            session_map[key] = {
+                "related_type": n.related_type,
+                "related_id": n.related_id,
+                "subject": subject,
+                "notifications": [],
+                "pending_count": 0,
+                "delivered_count": 0,
+                "read_count": 0,
+            }
+        session_map[key]["notifications"].append(n)
+        if n.delivery_status == "pending":
+            session_map[key]["pending_count"] += 1
+        elif n.delivery_status == "delivered":
+            session_map[key]["delivered_count"] += 1
+        elif n.delivery_status == "read":
+            session_map[key]["read_count"] += 1
+
+    session_list = list(session_map.values())
+    for s in session_list:
+        s["notifications"].sort(key=lambda n: n.created_at)
+        s["total_count"] = len(s["notifications"])
+        s["first_at"] = s["notifications"][0].created_at
+        s["latest_at"] = s["notifications"][-1].created_at
+        s["latest_title"] = s["notifications"][-1].title
+        s["notifications"].sort(key=lambda n: n.created_at, reverse=True)
+
+    session_list.sort(key=lambda s: s["latest_at"], reverse=True)
+    paged = session_list[skip: skip + limit]
+
+    result = []
+    for s in paged:
+        notif_responses = [NotificationResponse.model_validate(n) for n in s["notifications"]]
+        result.append(NotificationSessionItem(
+            related_type=s["related_type"],
+            related_id=s["related_id"],
+            subject=s["subject"],
+            total_count=s["total_count"],
+            pending_count=s["pending_count"],
+            delivered_count=s["delivered_count"],
+            read_count=s["read_count"],
+            first_at=s["first_at"],
+            latest_at=s["latest_at"],
+            latest_title=s["latest_title"],
+            notifications=notif_responses,
+        ))
+    return result
+
+
+def export_notifications_csv(
+    db: Session,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    notification_type: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    is_read: Optional[bool] = None,
+    recipient_role: Optional[str] = None,
+    recipient_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    notifs = get_all_notifications(
+        db, start_date, end_date, notification_type, delivery_status,
+        is_read, recipient_role, recipient_name, skip=0, limit=10000
+    )
+
+    rows = [
+        "ID,创建时间,角色,接收人姓名,业务类型,关联类型,关联ID,标题,内容,优先级,投递状态,送达时间,已读时间,是否已读"
+    ]
+    for n in notifs:
+        rows.append(
+            f"{n.id},{n.created_at},{n.recipient_role},{n.recipient_name or ''},{n.notification_type},"
+            f"{n.related_type or ''},{n.related_id or ''},"
+            f"\"{n.title.replace('\"','\"\"')}\",\"{n.content[:100].replace('\"','\"\"')}\","
+            f"{n.priority},{n.delivery_status},{n.delivered_at or ''},{n.read_at or ''},{n.is_read}"
+        )
+
+    csv_content = "\n".join(rows)
+    suffix = ""
+    if recipient_role:
+        suffix += f"_{recipient_role}"
+    if recipient_name:
+        suffix += f"_{recipient_name}"
+    if notification_type:
+        suffix += f"_{notification_type}"
+    scope = f"{start_date}_to_{end_date}" if start_date and end_date else "all"
+    return {
+        "success": True,
+        "count": len(notifs),
+        "format": "csv",
+        "content": csv_content,
+        "filename": f"notifications{suffix}_{scope}.csv",
+    }
 
 
 def mark_notification_read(db: Session, notification_id: int) -> Optional[Notification]:
