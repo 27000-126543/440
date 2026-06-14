@@ -277,6 +277,9 @@ class TrainDispatch(Base):
     driver = Column(String(50), nullable=True)
     departure_time = Column(DateTime, nullable=True)
     scheduled_departure = Column(DateTime, nullable=True)
+    departure_issued_at = Column(DateTime, nullable=True)
+    driver_confirmed_at = Column(DateTime, nullable=True)
+    actual_departure_time = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -314,8 +317,11 @@ class Notification(Base):
     related_type = Column(String(50), nullable=True)
     related_id = Column(Integer, nullable=True)
     is_read = Column(Boolean, default=False)
+    delivery_status = Column(String(20), default="pending")
     priority = Column(String(20), default="normal")
     created_at = Column(DateTime, default=datetime.utcnow)
+    delivered_at = Column(DateTime, nullable=True)
+    read_at = Column(DateTime, nullable=True)
 
 
 class Station(Base):

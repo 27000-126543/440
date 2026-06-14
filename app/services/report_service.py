@@ -1,5 +1,7 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from datetime import datetime, timedelta
+from typing import List, Optional
 
 from app.models.models import (
     OperationReport,
@@ -9,8 +11,21 @@ from app.models.models import (
     Container,
     Station,
 )
-from app.schemas.report import ReportExportRequest
+from app.schemas.report import (
+    ReportExportRequest,
+    DailyTrendItem,
+    TrendSummary,
+)
 from app.services.notification_service import push_status_notification
+
+
+def _date_range(start_date: str, end_date: str):
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    cursor = start
+    while cursor <= end:
+        yield cursor.strftime("%Y-%m-%d")
+        cursor += timedelta(days=1)
 
 
 def calculate_marshalling_efficiency(db: Session, date_str: str, station_code: str) -> float:
@@ -37,21 +52,20 @@ def calculate_avg_stay_time(db: Session, date_str: str, station_code: str) -> fl
     next_day = date_obj + timedelta(days=1)
 
     query = db.query(Vehicle).filter(
-        Vehicle.arrived_at >= date_obj - timedelta(days=7),
-        Vehicle.departed_at != None,
+        Vehicle.departed_at >= date_obj,
         Vehicle.departed_at < next_day,
         Vehicle.station_code == station_code,
+        Vehicle.arrived_at != None,
     )
 
     vehicles = query.all()
     if not vehicles:
         return 0.0
 
-    total_hours = 0
+    total_hours = 0.0
     for v in vehicles:
-        if v.arrived_at and v.departed_at:
-            stay_hours = (v.departed_at - v.arrived_at).total_seconds() / 3600
-            total_hours += stay_hours
+        stay_hours = (v.departed_at - v.arrived_at).total_seconds() / 3600
+        total_hours += stay_hours
 
     return round(total_hours / len(vehicles), 2)
 
@@ -135,18 +149,19 @@ def count_containers(db: Session, date_str: str, station_code: str) -> int:
     )
 
 
+def _stations_to_process(db: Session, station_code: Optional[str]) -> List[str]:
+    if station_code:
+        return [station_code]
+    station_objs = db.query(Station).all()
+    stations = [s.station_code for s in station_objs]
+    return stations if stations else ["DEFAULT"]
+
+
 def generate_daily_report(db: Session, date_str: str = None, station_code: str = None) -> list:
     if not date_str:
         date_str = datetime.utcnow().strftime("%Y-%m-%d")
 
-    stations = []
-    if station_code:
-        stations = [station_code]
-    else:
-        station_objs = db.query(Station).all()
-        stations = [s.station_code for s in station_objs]
-        if not stations:
-            stations = ["DEFAULT"]
+    stations = _stations_to_process(db, station_code)
 
     reports = []
     for sc in stations:
@@ -158,11 +173,8 @@ def generate_daily_report(db: Session, date_str: str = None, station_code: str =
             )
             .first()
         )
-        if existing:
-            reports.append(existing)
-            continue
 
-        report = OperationReport(
+        report_data = dict(
             report_date=date_str,
             station_code=sc,
             marshalling_efficiency=calculate_marshalling_efficiency(db, date_str, sc),
@@ -173,7 +185,14 @@ def generate_daily_report(db: Session, date_str: str = None, station_code: str =
             total_maintenance=count_maintenance_plans(db, date_str, sc),
             total_containers_handled=count_containers(db, date_str, sc),
         )
-        db.add(report)
+
+        if existing:
+            for k, v in report_data.items():
+                setattr(existing, k, v)
+            report = existing
+        else:
+            report = OperationReport(generated_at=datetime.utcnow(), **report_data)
+            db.add(report)
         reports.append(report)
 
     db.commit()
@@ -212,26 +231,102 @@ def get_reports(
     return query.order_by(OperationReport.report_date.desc(), OperationReport.station_code).offset(skip).limit(limit).all()
 
 
+def get_trend_summary(
+    db: Session,
+    start_date: str,
+    end_date: str,
+    station_code: Optional[str] = None,
+) -> TrendSummary:
+    stations = _stations_to_process(db, station_code)
+
+    daily_trend: List[DailyTrendItem] = []
+    total_arrived = 0
+    total_departed = 0
+    total_maintenance = 0
+    total_containers = 0
+    marshalling_sum = 0.0
+    stay_sum = 0.0
+    maintenance_sum = 0.0
+    valid_days = 0
+
+    for date_str in _date_range(start_date, end_date):
+        for sc in stations:
+            arrived = count_arrived_vehicles(db, date_str, sc)
+            departed = count_departed_vehicles(db, date_str, sc)
+            maint = count_maintenance_plans(db, date_str, sc)
+            containers = count_containers(db, date_str, sc)
+            marshalling_eff = calculate_marshalling_efficiency(db, date_str, sc)
+            stay = calculate_avg_stay_time(db, date_str, sc)
+            maint_rate = calculate_maintenance_completion_rate(db, date_str, sc)
+
+            total_arrived += arrived
+            total_departed += departed
+            total_maintenance += maint
+            total_containers += containers
+            marshalling_sum += marshalling_eff
+            stay_sum += stay
+            maintenance_sum += maint_rate
+            valid_days += 1
+
+            daily_trend.append(DailyTrendItem(
+                report_date=date_str,
+                station_code=sc,
+                total_arrived=arrived,
+                total_departed=departed,
+                marshalling_efficiency=marshalling_eff,
+                avg_stay_time=stay,
+                maintenance_completion_rate=maint_rate,
+                total_maintenance=maint,
+                total_containers_handled=containers,
+            ))
+
+    avg_marshalling = round(marshalling_sum / valid_days, 2) if valid_days > 0 else 0.0
+    avg_stay = round(stay_sum / valid_days, 2) if valid_days > 0 else 0.0
+    avg_maintenance = round(maintenance_sum / valid_days, 2) if valid_days > 0 else 0.0
+
+    return TrendSummary(
+        start_date=start_date,
+        end_date=end_date,
+        station_codes=stations,
+        total_arrived=total_arrived,
+        total_departed=total_departed,
+        avg_marshalling_efficiency=avg_marshalling,
+        avg_stay_time=avg_stay,
+        avg_maintenance_completion_rate=avg_maintenance,
+        total_maintenance=total_maintenance,
+        total_containers_handled=total_containers,
+        daily_trend=daily_trend,
+    )
+
+
 def export_reports(db: Session, request: ReportExportRequest) -> dict:
-    reports = get_reports(db, request.start_date, request.end_date, request.station_code)
+    summary = get_trend_summary(db, request.start_date, request.end_date, request.station_code)
 
     csv_rows = [
-        "日期,场站,编组效率(%),平均停留时间(小时),检修完成率(%),到达总数,发车总数,检修总数,集装箱处理数,生成时间"
+        "日期,场站,编组效率(%),平均停留时间(小时),检修完成率(%),到达总数,发车总数,检修总数,集装箱处理数"
     ]
-    for r in reports:
+    for item in summary.daily_trend:
         csv_rows.append(
-            f"{r.report_date},{r.station_code},{r.marshalling_efficiency},{r.avg_stay_time},"
-            f"{r.maintenance_completion_rate},{r.total_arrived},{r.total_departed},"
-            f"{r.total_maintenance},{r.total_containers_handled},{r.generated_at}"
+            f"{item.report_date},{item.station_code},{item.marshalling_efficiency},{item.avg_stay_time},"
+            f"{item.maintenance_completion_rate},{item.total_arrived},{item.total_departed},"
+            f"{item.total_maintenance},{item.total_containers_handled}"
         )
+
+    csv_rows.append("")
+    csv_rows.append(
+        f"汇总,{','.join(summary.station_codes)},{summary.avg_marshalling_efficiency},"
+        f"{summary.avg_stay_time},{summary.avg_maintenance_completion_rate},"
+        f"{summary.total_arrived},{summary.total_departed},"
+        f"{summary.total_maintenance},{summary.total_containers_handled}"
+    )
 
     csv_content = "\n".join(csv_rows)
 
     filename_suffix = f"_{request.station_code}" if request.station_code else ""
     return {
         "success": True,
-        "count": len(reports),
+        "count": len(summary.daily_trend),
         "format": "csv",
         "content": csv_content,
-        "filename": f"operation_report{filename_suffix}_{request.start_date}_{request.end_date}.csv",
+        "filename": f"operation_report_trend{filename_suffix}_{request.start_date}_{request.end_date}.csv",
     }
