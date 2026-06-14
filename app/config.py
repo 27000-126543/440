@@ -1,0 +1,13 @@
+import os
+
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./railway_dispatch.db")
+
+DISASSEMBLY_TIMEOUT_MINUTES = 120
+MAINTENANCE_OVERDUE_HOURS = 24
+PUSH_TASK_TIMEOUT_MINUTES = 60
+
+STATION_CAPACITY_DEFAULT = 200
+
+NOTIFICATION_ROLES = ["dispatcher", "shunter", "maintenance"]
+
+REPORT_GENERATION_HOUR = 0
