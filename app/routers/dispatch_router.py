@@ -7,13 +7,19 @@ from app.schemas.dispatch import (
     TrainDispatchResponse,
     TrainDispatchCreate,
     BrakeTestRequest,
+    DriverConfirmRequest,
 )
+from app.schemas.report import DispatchFlowResponse
 from app.services.dispatch_service import (
     create_train_dispatch,
     get_train_dispatches,
     verify_sequence,
     record_brake_test,
     issue_departure_command,
+    driver_confirm_departure,
+    record_actual_departure,
+    get_dispatch_flow,
+    list_dispatch_flows_by_train,
 )
 
 router = APIRouter(prefix="/dispatch", tags=["发车管理"])
@@ -57,3 +63,32 @@ def depart(dispatch_id: int, driver: str, db: Session = Depends(get_db)):
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
     return result
+
+
+@router.post("/{dispatch_id}/driver-confirm")
+def driver_confirm(dispatch_id: int, request: DriverConfirmRequest, db: Session = Depends(get_db)):
+    result = driver_confirm_departure(db, dispatch_id, request.driver_name)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@router.post("/{dispatch_id}/actual-departure")
+def actual_departure(dispatch_id: int, db: Session = Depends(get_db)):
+    result = record_actual_departure(db, dispatch_id)
+    if not result["success"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@router.get("/{dispatch_id}/flow", response_model=DispatchFlowResponse)
+def dispatch_flow(dispatch_id: int, db: Session = Depends(get_db)):
+    result = get_dispatch_flow(db, dispatch_id=dispatch_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="发车记录不存在")
+    return result
+
+
+@router.get("/by-train/{train_no}/flow", response_model=List[DispatchFlowResponse])
+def dispatch_flow_by_train(train_no: str, db: Session = Depends(get_db)):
+    return list_dispatch_flows_by_train(db, train_no)
