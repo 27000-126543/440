@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 
 class OperationReportBase(BaseModel):
@@ -51,6 +51,40 @@ class DailyTotalTrendItem(BaseModel):
     avg_maintenance_completion_rate: float
     total_maintenance: int
     total_containers_handled: int
+
+
+class HourlyDistributionItem(BaseModel):
+    hour: int
+    station_code: str
+    arrived_count: int
+    departed_count: int
+
+
+class HourlyDistributionSummary(BaseModel):
+    start_date: str
+    end_date: str
+    station_codes: List[str]
+    by_station: List[HourlyDistributionItem]
+    total: Dict[str, Dict[str, int]]
+
+
+class TrainDistributionItem(BaseModel):
+    station_code: str
+    train_no: str
+    total_arrived_vehicles: int
+    total_departures: int
+    first_arrival: Optional[datetime] = None
+    last_departure: Optional[datetime] = None
+
+
+class TrainDistributionSummary(BaseModel):
+    start_date: str
+    end_date: str
+    station_codes: List[str]
+    items: List[TrainDistributionItem]
+    total_trains: int
+    total_arrived_vehicles: int
+    total_departures: int
 
 
 class TrendSummary(BaseModel):
@@ -115,6 +149,16 @@ class NotificationQueryRequest(BaseModel):
     station_codes: Optional[List[str]] = None
 
 
+class SessionTimelineEvent(BaseModel):
+    event_index: int
+    title: str
+    delivery_status: str
+    at: datetime
+    notification_id: int
+    content: str
+    prev_interval_seconds: Optional[float] = None
+
+
 class NotificationSessionItem(BaseModel):
     related_type: Optional[str]
     related_id: Optional[int]
@@ -126,7 +170,52 @@ class NotificationSessionItem(BaseModel):
     first_at: datetime
     latest_at: datetime
     latest_title: str
+    total_duration_seconds: float
     notifications: List[NotificationResponse]
+    timeline: List[SessionTimelineEvent]
+
+
+class DispatchDelayItem(BaseModel):
+    dispatch_id: int
+    dispatch_no: str
+    train_no: str
+    driver: Optional[str]
+    station_code: Optional[str]
+    scheduled_departure: Optional[datetime] = None
+    departure_issued_at: Optional[datetime] = None
+    driver_confirmed_at: Optional[datetime] = None
+    actual_departure_time: Optional[datetime] = None
+    issue_delay_seconds: Optional[float] = None
+    confirm_delay_seconds: Optional[float] = None
+    actual_delay_seconds: Optional[float] = None
+    total_delay_seconds: Optional[float] = None
+
+
+class DriverDelayStats(BaseModel):
+    driver: str
+    total_dispatches: int
+    avg_confirm_delay_seconds: float
+    avg_actual_delay_seconds: float
+    bottleneck_stage: str
+
+
+class StationDelayStats(BaseModel):
+    station_code: str
+    total_dispatches: int
+    avg_issue_delay_seconds: float
+    avg_confirm_delay_seconds: float
+    avg_actual_delay_seconds: float
+    bottleneck_stage: str
+
+
+class DispatchDelaySummary(BaseModel):
+    start_date: str
+    end_date: str
+    station_codes: List[str]
+    total_dispatches: int
+    dispatches: List[DispatchDelayItem]
+    by_driver: List[DriverDelayStats]
+    by_station: List[StationDelayStats]
 
 
 class DispatchVehicleItem(BaseModel):
@@ -144,6 +233,7 @@ class DispatchFlowStep(BaseModel):
     status: str
     timestamp: Optional[datetime] = None
     remark: Optional[str] = None
+    interval_seconds: Optional[float] = None
 
 
 class DispatchFlowResponse(BaseModel):
@@ -156,3 +246,4 @@ class DispatchFlowResponse(BaseModel):
     created_at: datetime
     flow: List[DispatchFlowStep]
     vehicles: List[DispatchVehicleItem]
+    total_elapsed_seconds: Optional[float] = None

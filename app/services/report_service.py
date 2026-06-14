@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from app.models.models import (
     OperationReport,
@@ -18,6 +18,14 @@ from app.schemas.report import (
     DailyTrendItem,
     DailyTotalTrendItem,
     TrendSummary,
+    HourlyDistributionItem,
+    HourlyDistributionSummary,
+    TrainDistributionItem,
+    TrainDistributionSummary,
+    DispatchDelayItem,
+    DispatchDelaySummary,
+    DriverDelayStats,
+    StationDelayStats,
 )
 from app.services.notification_service import push_status_notification
 
@@ -259,7 +267,7 @@ def get_reports(
         query = query.filter(OperationReport.report_date >= start_date)
     if end_date:
         query = query.filter(OperationReport.report_date <= end_date)
-    codes = _parse_station_codes(db, station_code, station_codes) if (station_code or station_codes or True) else None
+    codes = _parse_station_codes(db, station_code, station_codes)
     if codes:
         query = query.filter(OperationReport.station_code.in_(codes))
     return query.order_by(OperationReport.report_date.desc(), OperationReport.station_code).offset(skip).limit(limit).all()
@@ -275,7 +283,7 @@ def get_trend_summary(
     stations = _parse_station_codes(db, station_code, station_codes)
 
     daily_trend: List[DailyTrendItem] = []
-    daily_total_map = {}
+    daily_total_map: Dict[str, DailyTotalTrendItem] = {}
 
     total_arrived = 0
     total_departed = 0
@@ -372,14 +380,311 @@ def get_trend_summary(
     )
 
 
+def get_hourly_distribution(
+    db: Session,
+    start_date: str,
+    end_date: str,
+    station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = None,
+) -> HourlyDistributionSummary:
+    stations = _parse_station_codes(db, station_code, station_codes)
+    sd = datetime.strptime(start_date, "%Y-%m-%d")
+    ed = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+
+    by_station: List[HourlyDistributionItem] = []
+    total_accum: Dict[str, Dict[str, int]] = {str(h): {"arrived_count": 0, "departed_count": 0} for h in range(24)}
+
+    for sc in stations:
+        arrived_q = (
+            db.query(
+                func.strftime("%H", Vehicle.arrived_at).label("hour"),
+                func.count(Vehicle.id).label("cnt"),
+            )
+            .filter(
+                Vehicle.arrived_at >= sd,
+                Vehicle.arrived_at < ed,
+                Vehicle.station_code == sc,
+            )
+            .group_by(func.strftime("%H", Vehicle.arrived_at))
+            .all()
+        )
+        departed_q = (
+            db.query(
+                func.strftime("%H", TrainDispatch.actual_departure_time).label("hour"),
+                func.count(TrainDispatch.id).label("cnt"),
+            )
+            .join(MarshallingPlan, TrainDispatch.plan_id == MarshallingPlan.id)
+            .filter(
+                TrainDispatch.actual_departure_time >= sd,
+                TrainDispatch.actual_departure_time < ed,
+                MarshallingPlan.station_code == sc,
+            )
+            .group_by(func.strftime("%H", TrainDispatch.actual_departure_time))
+            .all()
+        )
+        a_map = {int(r.hour or 0): r.cnt for r in arrived_q}
+        d_map = {int(r.hour or 0): r.cnt for r in departed_q}
+
+        for h in range(24):
+            ac = a_map.get(h, 0)
+            dc = d_map.get(h, 0)
+            by_station.append(HourlyDistributionItem(
+                hour=h,
+                station_code=sc,
+                arrived_count=ac,
+                departed_count=dc,
+            ))
+            total_accum[str(h)]["arrived_count"] += ac
+            total_accum[str(h)]["departed_count"] += dc
+
+    return HourlyDistributionSummary(
+        start_date=start_date,
+        end_date=end_date,
+        station_codes=stations,
+        by_station=by_station,
+        total=total_accum,
+    )
+
+
+def get_train_distribution(
+    db: Session,
+    start_date: str,
+    end_date: str,
+    station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = None,
+) -> TrainDistributionSummary:
+    stations = _parse_station_codes(db, station_code, station_codes)
+    sd = datetime.strptime(start_date, "%Y-%m-%d")
+    ed = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+
+    train_map: Dict[str, Dict[str, Any]] = {}
+
+    arrived = (
+        db.query(
+            Vehicle.train_no,
+            Vehicle.station_code,
+            func.count(Vehicle.id).label("cnt"),
+            func.min(Vehicle.arrived_at).label("first_arr"),
+        )
+        .filter(
+            Vehicle.arrived_at >= sd,
+            Vehicle.arrived_at < ed,
+            Vehicle.station_code.in_(stations),
+        )
+        .group_by(Vehicle.train_no, Vehicle.station_code)
+        .all()
+    )
+    for r in arrived:
+        key = f"{r.station_code}:{r.train_no}"
+        if key not in train_map:
+            train_map[key] = {
+                "station_code": r.station_code,
+                "train_no": r.train_no,
+                "total_arrived_vehicles": 0,
+                "total_departures": 0,
+                "first_arrival": None,
+                "last_departure": None,
+            }
+        train_map[key]["total_arrived_vehicles"] = r.cnt
+        train_map[key]["first_arrival"] = r.first_arr
+
+    departed = (
+        db.query(
+            TrainDispatch.train_no,
+            MarshallingPlan.station_code,
+            func.count(TrainDispatch.id).label("cnt"),
+            func.max(TrainDispatch.actual_departure_time).label("last_dep"),
+        )
+        .join(MarshallingPlan, TrainDispatch.plan_id == MarshallingPlan.id)
+        .filter(
+            TrainDispatch.actual_departure_time >= sd,
+            TrainDispatch.actual_departure_time < ed,
+            MarshallingPlan.station_code.in_(stations),
+        )
+        .group_by(TrainDispatch.train_no, MarshallingPlan.station_code)
+        .all()
+    )
+    for r in departed:
+        key = f"{r.station_code}:{r.train_no}"
+        if key not in train_map:
+            train_map[key] = {
+                "station_code": r.station_code,
+                "train_no": r.train_no,
+                "total_arrived_vehicles": 0,
+                "total_departures": 0,
+                "first_arrival": None,
+                "last_departure": None,
+            }
+        train_map[key]["total_departures"] = r.cnt
+        train_map[key]["last_departure"] = r.last_dep
+
+    items: List[TrainDistributionItem] = []
+    total_trains = 0
+    total_arrived_vehicles = 0
+    total_departures = 0
+    for t in train_map.values():
+        items.append(TrainDistributionItem(**t))
+        total_trains += 1
+        total_arrived_vehicles += t["total_arrived_vehicles"]
+        total_departures += t["total_departures"]
+
+    items.sort(key=lambda x: (x.station_code, x.train_no))
+
+    return TrainDistributionSummary(
+        start_date=start_date,
+        end_date=end_date,
+        station_codes=stations,
+        items=items,
+        total_trains=total_trains,
+        total_arrived_vehicles=total_arrived_vehicles,
+        total_departures=total_departures,
+    )
+
+
+def get_dispatch_delay_summary(
+    db: Session,
+    start_date: str,
+    end_date: str,
+    station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = None,
+) -> DispatchDelaySummary:
+    stations = _parse_station_codes(db, station_code, station_codes)
+    sd = datetime.strptime(start_date, "%Y-%m-%d")
+    ed = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+
+    dispatches = (
+        db.query(TrainDispatch)
+        .join(MarshallingPlan, TrainDispatch.plan_id == MarshallingPlan.id)
+        .filter(
+            TrainDispatch.created_at >= sd,
+            TrainDispatch.created_at < ed,
+            MarshallingPlan.station_code.in_(stations),
+        )
+        .all()
+    )
+
+    delay_items: List[DispatchDelayItem] = []
+    driver_stats: Dict[str, Dict[str, Any]] = {}
+    station_stats: Dict[str, Dict[str, Any]] = {}
+
+    for d in dispatches:
+        plan = db.query(MarshallingPlan).filter(MarshallingPlan.id == d.plan_id).first()
+        sc = plan.station_code if plan else None
+        base = d.scheduled_departure or d.created_at
+
+        issue_delay = (d.departure_issued_at - base).total_seconds() if d.departure_issued_at else None
+        confirm_delay = (d.driver_confirmed_at - d.departure_issued_at).total_seconds() if (d.driver_confirmed_at and d.departure_issued_at) else None
+        actual_delay = (d.actual_departure_time - d.driver_confirmed_at).total_seconds() if (d.actual_departure_time and d.driver_confirmed_at) else None
+        total_delay = (d.actual_departure_time - base).total_seconds() if (d.actual_departure_time) else None
+
+        delay_items.append(DispatchDelayItem(
+            dispatch_id=d.id,
+            dispatch_no=d.dispatch_no,
+            train_no=d.train_no,
+            driver=d.driver,
+            station_code=sc,
+            scheduled_departure=d.scheduled_departure,
+            departure_issued_at=d.departure_issued_at,
+            driver_confirmed_at=d.driver_confirmed_at,
+            actual_departure_time=d.actual_departure_time,
+            issue_delay_seconds=issue_delay,
+            confirm_delay_seconds=confirm_delay,
+            actual_delay_seconds=actual_delay,
+            total_delay_seconds=total_delay,
+        ))
+
+        if d.driver:
+            if d.driver not in driver_stats:
+                driver_stats[d.driver] = {
+                    "total": 0, "confirm_sum": 0.0, "confirm_cnt": 0,
+                    "actual_sum": 0.0, "actual_cnt": 0,
+                }
+            driver_stats[d.driver]["total"] += 1
+            if confirm_delay is not None:
+                driver_stats[d.driver]["confirm_sum"] += confirm_delay
+                driver_stats[d.driver]["confirm_cnt"] += 1
+            if actual_delay is not None:
+                driver_stats[d.driver]["actual_sum"] += actual_delay
+                driver_stats[d.driver]["actual_cnt"] += 1
+
+        if sc:
+            if sc not in station_stats:
+                station_stats[sc] = {
+                    "total": 0, "issue_sum": 0.0, "issue_cnt": 0,
+                    "confirm_sum": 0.0, "confirm_cnt": 0,
+                    "actual_sum": 0.0, "actual_cnt": 0,
+                }
+            station_stats[sc]["total"] += 1
+            if issue_delay is not None:
+                station_stats[sc]["issue_sum"] += issue_delay
+                station_stats[sc]["issue_cnt"] += 1
+            if confirm_delay is not None:
+                station_stats[sc]["confirm_sum"] += confirm_delay
+                station_stats[sc]["confirm_cnt"] += 1
+            if actual_delay is not None:
+                station_stats[sc]["actual_sum"] += actual_delay
+                station_stats[sc]["actual_cnt"] += 1
+
+    driver_list: List[DriverDelayStats] = []
+    for driver, s in driver_stats.items():
+        avg_c = round(s["confirm_sum"] / s["confirm_cnt"], 2) if s["confirm_cnt"] else 0.0
+        avg_a = round(s["actual_sum"] / s["actual_cnt"], 2) if s["actual_cnt"] else 0.0
+        if avg_c >= avg_a:
+            bottleneck = "司机确认" if avg_c > 0 else "无明显瓶颈"
+        else:
+            bottleneck = "实际发车离站" if avg_a > 0 else "无明显瓶颈"
+        driver_list.append(DriverDelayStats(
+            driver=driver,
+            total_dispatches=s["total"],
+            avg_confirm_delay_seconds=avg_c,
+            avg_actual_delay_seconds=avg_a,
+            bottleneck_stage=bottleneck,
+        ))
+
+    station_list: List[StationDelayStats] = []
+    for sc, s in station_stats.items():
+        avg_i = round(s["issue_sum"] / s["issue_cnt"], 2) if s["issue_cnt"] else 0.0
+        avg_c = round(s["confirm_sum"] / s["confirm_cnt"], 2) if s["confirm_cnt"] else 0.0
+        avg_a = round(s["actual_sum"] / s["actual_cnt"], 2) if s["actual_cnt"] else 0.0
+        stages = [("指令下发", avg_i), ("司机确认", avg_c), ("实际发车", avg_a)]
+        max_stage = max(stages, key=lambda x: x[1])
+        bottleneck = max_stage[0] if max_stage[1] > 0 else "无明显瓶颈"
+        station_list.append(StationDelayStats(
+            station_code=sc,
+            total_dispatches=s["total"],
+            avg_issue_delay_seconds=avg_i,
+            avg_confirm_delay_seconds=avg_c,
+            avg_actual_delay_seconds=avg_a,
+            bottleneck_stage=bottleneck,
+        ))
+
+    return DispatchDelaySummary(
+        start_date=start_date,
+        end_date=end_date,
+        station_codes=stations,
+        total_dispatches=len(delay_items),
+        dispatches=delay_items,
+        by_driver=sorted(driver_list, key=lambda x: x.total_dispatches, reverse=True),
+        by_station=sorted(station_list, key=lambda x: x.station_code),
+    )
+
+
 def export_reports(db: Session, request: ReportExportRequest) -> dict:
     summary = get_trend_summary(
         db, request.start_date, request.end_date, request.station_code, request.station_codes
     )
+    hourly = get_hourly_distribution(
+        db, request.start_date, request.end_date, request.station_code, request.station_codes
+    )
+    trains = get_train_distribution(
+        db, request.start_date, request.end_date, request.station_code, request.station_codes
+    )
 
-    csv_rows = [
+    csv_rows = []
+    csv_rows.append("=== 第一部分：每日运营趋势（按场站明细） ===")
+    csv_rows.append(
         "日期,场站,编组效率(%),平均停留时间(小时),检修完成率(%),到达总数,实际发车数,检修总数,集装箱处理数"
-    ]
+    )
     for item in summary.daily_trend:
         csv_rows.append(
             f"{item.report_date},{item.station_code},{item.marshalling_efficiency},{item.avg_stay_time},"
@@ -388,14 +693,44 @@ def export_reports(db: Session, request: ReportExportRequest) -> dict:
         )
 
     csv_rows.append("")
+    csv_rows.append("=== 第二部分：每日运营趋势（多站汇总） ===")
     csv_rows.append(
-        "日期,场站范围,平均编组效率(%),平均停留时间(小时),平均检修完成率(%),到达总数,实际发车总数,检修总数,集装箱处理总数"
+        "日期,场站数量,平均编组效率(%),平均停留时间(小时),平均检修完成率(%),到达总数,实际发车总数,检修总数,集装箱处理总数"
     )
     for tot in summary.daily_total_trend:
         csv_rows.append(
-            f"{tot.report_date},MULTI({len(summary.station_codes)}站),{tot.avg_marshalling_efficiency},"
-            f"{tot.avg_stay_time},{tot.avg_maintenance_completion_rate},{tot.total_arrived},"
-            f"{tot.total_departed},{tot.total_maintenance},{tot.total_containers_handled}"
+            f"{tot.report_date},{len(summary.station_codes)},{tot.avg_marshalling_efficiency},"
+            f"{tot.avg_stay_time},{tot.avg_maintenance_completion_rate},"
+            f"{tot.total_arrived},{tot.total_departed},{tot.total_maintenance},{tot.total_containers_handled}"
+        )
+
+    csv_rows.append("")
+    csv_rows.append("=== 第三部分：小时分布（0-23时） ===")
+    header = ["小时"] + [f"{sc}_到达" for sc in summary.station_codes] + [f"{sc}_发车" for sc in summary.station_codes] + ["合计_到达", "合计_发车"]
+    csv_rows.append(",".join(header))
+    for h in range(24):
+        row = [str(h)]
+        total_arr = 0
+        total_dep = 0
+        for sc in summary.station_codes:
+            match = [x for x in hourly.by_station if x.hour == h and x.station_code == sc]
+            arr = match[0].arrived_count if match else 0
+            dep = match[0].departed_count if match else 0
+            row.append(str(arr))
+            row.append(str(dep))
+            total_arr += arr
+            total_dep += dep
+        row.append(str(total_arr))
+        row.append(str(total_dep))
+        csv_rows.append(",".join(row))
+
+    csv_rows.append("")
+    csv_rows.append("=== 第四部分：车次分布 ===")
+    csv_rows.append("场站,车次,到达车辆数,发车班次数,首车到达时间,末班车发车时间")
+    for t in trains.items:
+        csv_rows.append(
+            f"{t.station_code},{t.train_no},{t.total_arrived_vehicles},{t.total_departures},"
+            f"{t.first_arrival or ''},{t.last_departure or ''}"
         )
 
     csv_rows.append("")
@@ -416,5 +751,5 @@ def export_reports(db: Session, request: ReportExportRequest) -> dict:
         "count": len(summary.daily_trend),
         "format": "csv",
         "content": csv_content,
-        "filename": f"operation_report_trend{suffix}_{request.start_date}_{request.end_date}.csv",
+        "filename": f"operation_report_full{suffix}_{request.start_date}_{request.end_date}.csv",
     }

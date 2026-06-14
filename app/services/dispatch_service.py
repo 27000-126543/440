@@ -298,6 +298,7 @@ def get_dispatch_flow(
     station_code = plan.station_code if plan else None
 
     flow: List[DispatchFlowStep] = []
+    timestamps: List[Optional[datetime]] = []
 
     flow.append(DispatchFlowStep(
         step="发车记录创建",
@@ -305,26 +306,31 @@ def get_dispatch_flow(
         timestamp=dispatch.created_at,
         remark=f"创建发车编号：{dispatch.dispatch_no}",
     ))
+    timestamps.append(dispatch.created_at)
 
     seq_status = "completed" if dispatch.sequence_checked else "pending"
+    seq_ts = dispatch.updated_at if dispatch.sequence_checked else None
     if dispatch.status == "sequence_failed":
         seq_status = "failed"
     flow.append(DispatchFlowStep(
         step="车辆顺序校验",
         status=seq_status,
-        timestamp=dispatch.updated_at if dispatch.sequence_checked else None,
+        timestamp=seq_ts,
         remark="按编组计划校验车辆序号连续性",
     ))
+    timestamps.append(seq_ts)
 
     brake_status = "completed" if dispatch.brake_test_passed else "pending"
+    brake_ts = dispatch.updated_at if dispatch.brake_test_passed else None
     if dispatch.status == "brake_failed":
         brake_status = "failed"
     flow.append(DispatchFlowStep(
         step="制动测试",
         status=brake_status,
-        timestamp=dispatch.updated_at if dispatch.brake_test_passed else None,
+        timestamp=brake_ts,
         remark="列车制动安全测试",
     ))
+    timestamps.append(brake_ts)
 
     flow.append(DispatchFlowStep(
         step="发车指令下发",
@@ -332,6 +338,7 @@ def get_dispatch_flow(
         timestamp=dispatch.departure_issued_at,
         remark=f"司机：{dispatch.driver}" if dispatch.driver else None,
     ))
+    timestamps.append(dispatch.departure_issued_at)
 
     flow.append(DispatchFlowStep(
         step="司机确认接收",
@@ -339,6 +346,7 @@ def get_dispatch_flow(
         timestamp=dispatch.driver_confirmed_at,
         remark="司机端收到指令后确认回执",
     ))
+    timestamps.append(dispatch.driver_confirmed_at)
 
     flow.append(DispatchFlowStep(
         step="实际发车驶离场站",
@@ -346,6 +354,18 @@ def get_dispatch_flow(
         timestamp=dispatch.actual_departure_time,
         remark="日报/趋势统计口径以此时间为准",
     ))
+    timestamps.append(dispatch.actual_departure_time)
+
+    for i in range(1, len(flow)):
+        if timestamps[i] and timestamps[i - 1]:
+            flow[i].interval_seconds = round(
+                (timestamps[i] - timestamps[i - 1]).total_seconds(), 2
+            )
+
+    completed_times = [t for t in timestamps if t is not None]
+    total_elapsed = None
+    if len(completed_times) >= 2:
+        total_elapsed = round((completed_times[-1] - completed_times[0]).total_seconds(), 2)
 
     vehicles = _get_dispatch_vehicles(db, dispatch)
 
@@ -359,6 +379,7 @@ def get_dispatch_flow(
         created_at=dispatch.created_at,
         flow=flow,
         vehicles=vehicles,
+        total_elapsed_seconds=total_elapsed,
     )
 
 

@@ -13,12 +13,18 @@ from app.schemas.report import (
     NotificationAckRequest,
     NotificationSessionItem,
     NotificationQueryRequest,
+    HourlyDistributionSummary,
+    TrainDistributionSummary,
+    DispatchDelaySummary,
 )
 from app.services.report_service import (
     generate_daily_report,
     get_reports,
     export_reports,
     get_trend_summary,
+    get_hourly_distribution,
+    get_train_distribution,
+    get_dispatch_delay_summary,
 )
 from app.services.notification_service import (
     get_notifications_by_role,
@@ -44,9 +50,10 @@ router = APIRouter(tags=["报表与通知"])
 def generate_report(
     date: Optional[str] = None,
     station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = Query(None),
     db: Session = Depends(get_db),
 ):
-    return generate_daily_report(db, date, station_code)
+    return generate_daily_report(db, date, station_code, station_codes)
 
 
 @router.get("/reports", response_model=List[OperationReportResponse])
@@ -71,6 +78,39 @@ def report_trend(
     db: Session = Depends(get_db),
 ):
     return get_trend_summary(db, start_date, end_date, station_code, station_codes)
+
+
+@router.get("/reports/hourly", response_model=HourlyDistributionSummary)
+def report_hourly(
+    start_date: str,
+    end_date: str,
+    station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = Query(None),
+    db: Session = Depends(get_db),
+):
+    return get_hourly_distribution(db, start_date, end_date, station_code, station_codes)
+
+
+@router.get("/reports/trains", response_model=TrainDistributionSummary)
+def report_trains(
+    start_date: str,
+    end_date: str,
+    station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = Query(None),
+    db: Session = Depends(get_db),
+):
+    return get_train_distribution(db, start_date, end_date, station_code, station_codes)
+
+
+@router.get("/dispatch/delay-summary", response_model=DispatchDelaySummary)
+def dispatch_delay_summary(
+    start_date: str,
+    end_date: str,
+    station_code: Optional[str] = None,
+    station_codes: Optional[List[str]] = Query(None),
+    db: Session = Depends(get_db),
+):
+    return get_dispatch_delay_summary(db, start_date, end_date, station_code, station_codes)
 
 
 @router.post("/reports/export")
@@ -138,12 +178,15 @@ def list_notification_sessions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     notification_type: Optional[str] = None,
+    delivery_status: Optional[str] = Query(None, description="pending/delivered/read 分段筛选"),
+    is_read: Optional[bool] = None,
     skip: int = 0,
     limit: int = 50,
     db: Session = Depends(get_db),
 ):
     return get_notification_sessions(
-        db, role, recipient_name, start_date, end_date, notification_type, skip, limit
+        db, role, recipient_name, start_date, end_date, notification_type,
+        delivery_status, is_read, skip, limit
     )
 
 

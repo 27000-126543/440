@@ -228,16 +228,20 @@ def get_notification_sessions(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     notification_type: Optional[str] = None,
+    delivery_status: Optional[str] = None,
+    is_read: Optional[bool] = None,
     skip: int = 0,
     limit: int = 50,
 ) -> List[NotificationSessionItem]:
+    from app.schemas.report import SessionTimelineEvent
+
     query = db.query(Notification)
     if role:
         query = query.filter(Notification.recipient_role == role)
     if recipient_name:
         query = query.filter(Notification.recipient_name == recipient_name)
     query = _apply_notification_filters(
-        query, start_date, end_date, notification_type, None, None, None, None
+        query, start_date, end_date, notification_type, delivery_status, is_read, None, None
     )
     all_notifs = query.order_by(Notification.created_at.desc()).all()
 
@@ -281,6 +285,26 @@ def get_notification_sessions(
         s["first_at"] = s["notifications"][0].created_at
         s["latest_at"] = s["notifications"][-1].created_at
         s["latest_title"] = s["notifications"][-1].title
+        s["total_duration_seconds"] = round(
+            (s["latest_at"] - s["first_at"]).total_seconds(), 2
+        )
+
+        timeline: List[SessionTimelineEvent] = []
+        for idx, n in enumerate(s["notifications"]):
+            prev_interval = None
+            if idx > 0:
+                prev_interval = round((n.created_at - s["notifications"][idx - 1].created_at).total_seconds(), 2)
+            timeline.append(SessionTimelineEvent(
+                event_index=idx + 1,
+                title=n.title,
+                delivery_status=n.delivery_status,
+                at=n.created_at,
+                notification_id=n.id,
+                content=n.content,
+                prev_interval_seconds=prev_interval,
+            ))
+        s["timeline"] = timeline
+
         s["notifications"].sort(key=lambda n: n.created_at, reverse=True)
 
     session_list.sort(key=lambda s: s["latest_at"], reverse=True)
@@ -300,7 +324,9 @@ def get_notification_sessions(
             first_at=s["first_at"],
             latest_at=s["latest_at"],
             latest_title=s["latest_title"],
+            total_duration_seconds=s["total_duration_seconds"],
             notifications=notif_responses,
+            timeline=s["timeline"],
         ))
     return result
 
@@ -321,13 +347,15 @@ def export_notifications_csv(
     )
 
     rows = [
-        "ID,创建时间,角色,接收人姓名,业务类型,关联类型,关联ID,标题,内容,优先级,投递状态,送达时间,已读时间,是否已读"
+        "ID,创建时间,角色,接收人ID,接收人姓名,业务类型,关联类型,关联ID,标题,内容,优先级,投递状态,送达时间,已读时间,是否已读"
     ]
     for n in notifs:
+        safe_title = (n.title or "").replace('"', '""').replace("\n", " ").replace("\r", " ")
+        safe_content = (n.content or "").replace('"', '""').replace("\n", " ").replace("\r", " ")
         rows.append(
-            f"{n.id},{n.created_at},{n.recipient_role},{n.recipient_name or ''},{n.notification_type},"
-            f"{n.related_type or ''},{n.related_id or ''},"
-            f"\"{n.title.replace('\"','\"\"')}\",\"{n.content[:100].replace('\"','\"\"')}\","
+            f"{n.id},{n.created_at},{n.recipient_role},{n.recipient_id or ''},{n.recipient_name or ''},"
+            f"{n.notification_type},{n.related_type or ''},{n.related_id or ''},"
+            f"\"{safe_title}\",\"{safe_content}\","
             f"{n.priority},{n.delivery_status},{n.delivered_at or ''},{n.read_at or ''},{n.is_read}"
         )
 
