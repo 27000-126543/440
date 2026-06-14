@@ -111,12 +111,14 @@ def detect_conflicts(db: Session, plan_type: str, train_no: str, station_code: s
     return {"has_conflict": False, "conflicts": [], "suggested_adjustment": None}
 
 
-def create_vehicles_from_arrival(db: Session, vehicles_data: list) -> list:
+def create_vehicles_from_arrival(db: Session, vehicles_data: list, station_code: str = None) -> list:
     created_vehicles = []
     for v_data in vehicles_data:
         vehicle = Vehicle(**v_data.model_dump())
         vehicle.status = "arrived"
         vehicle.arrived_at = datetime.utcnow()
+        if station_code:
+            vehicle.station_code = station_code
         db.add(vehicle)
         db.flush()
         created_vehicles.append(vehicle)
@@ -175,7 +177,7 @@ def handle_vehicle_arrival(db: Session, request: VehicleArrivalRequest) -> dict:
 
     conflict_result = detect_conflicts(db, plan_type, request.train_no, station_code)
 
-    created_vehicles = create_vehicles_from_arrival(db, sorted_vehicles_data)
+    created_vehicles = create_vehicles_from_arrival(db, sorted_vehicles_data, station_code)
 
     destination = sorted_vehicles_data[0].destination if sorted_vehicles_data else ""
 

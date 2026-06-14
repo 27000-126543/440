@@ -104,13 +104,15 @@ def assign_team_to_plan(db: Session, plan_id: int, skill_type: str = "general") 
     return plan
 
 
-def create_maintenance_plan(db: Session, plan_data: MaintenancePlanCreate) -> MaintenancePlan:
+def create_maintenance_plan(db: Session, plan_data: MaintenancePlanCreate, station_code: str = None) -> MaintenancePlan:
     plan_no = generate_plan_no()
 
     db_plan = MaintenancePlan(
         plan_no=plan_no,
         **plan_data.model_dump(),
     )
+    if station_code:
+        db_plan.station_code = station_code
     db.add(db_plan)
     db.flush()
 
@@ -171,7 +173,7 @@ def generate_maintenance_from_mileage(db: Session, vehicle_id: int) -> Maintenan
         deadline=deadline,
     )
 
-    return create_maintenance_plan(db, plan_data)
+    return create_maintenance_plan(db, plan_data, vehicle.station_code)
 
 
 def generate_maintenance_from_fault(db: Session, fault_record: FaultRecord) -> MaintenancePlan:
@@ -202,7 +204,10 @@ def generate_maintenance_from_fault(db: Session, fault_record: FaultRecord) -> M
         deadline=deadline,
     )
 
-    plan = create_maintenance_plan(db, plan_data)
+    vehicle = db.query(Vehicle).filter(Vehicle.id == vehicle_id).first()
+    vehicle_station = vehicle.station_code if vehicle else None
+
+    plan = create_maintenance_plan(db, plan_data, vehicle_station)
 
     skill_type = determine_skill_type("fault", fault_type)
     if plan and skill_type != "general":

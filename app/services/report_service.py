@@ -1,6 +1,5 @@
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
-from dateutil.relativedelta import relativedelta
 
 from app.models.models import (
     OperationReport,
@@ -14,16 +13,15 @@ from app.schemas.report import ReportExportRequest
 from app.services.notification_service import push_status_notification
 
 
-def calculate_marshalling_efficiency(db: Session, date_str: str, station_code: str = None) -> float:
+def calculate_marshalling_efficiency(db: Session, date_str: str, station_code: str) -> float:
     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
     next_day = date_obj + timedelta(days=1)
 
     query = db.query(MarshallingPlan).filter(
         MarshallingPlan.created_at >= date_obj,
         MarshallingPlan.created_at < next_day,
+        MarshallingPlan.station_code == station_code,
     )
-    if station_code:
-        query = query.filter(MarshallingPlan.station_code == station_code)
 
     total_plans = query.count()
     if total_plans == 0:
@@ -34,7 +32,7 @@ def calculate_marshalling_efficiency(db: Session, date_str: str, station_code: s
     return round(completed_plans / total_plans * 100, 2)
 
 
-def calculate_avg_stay_time(db: Session, date_str: str, station_code: str = None) -> float:
+def calculate_avg_stay_time(db: Session, date_str: str, station_code: str) -> float:
     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
     next_day = date_obj + timedelta(days=1)
 
@@ -42,6 +40,7 @@ def calculate_avg_stay_time(db: Session, date_str: str, station_code: str = None
         Vehicle.arrived_at >= date_obj - timedelta(days=7),
         Vehicle.departed_at != None,
         Vehicle.departed_at < next_day,
+        Vehicle.station_code == station_code,
     )
 
     vehicles = query.all()
@@ -57,13 +56,14 @@ def calculate_avg_stay_time(db: Session, date_str: str, station_code: str = None
     return round(total_hours / len(vehicles), 2)
 
 
-def calculate_maintenance_completion_rate(db: Session, date_str: str, station_code: str = None) -> float:
+def calculate_maintenance_completion_rate(db: Session, date_str: str, station_code: str) -> float:
     date_obj = datetime.strptime(date_str, "%Y-%m-%d")
     next_day = date_obj + timedelta(days=1)
 
     query = db.query(MaintenancePlan).filter(
         MaintenancePlan.created_at >= date_obj,
         MaintenancePlan.created_at < next_day,
+        MaintenancePlan.station_code == station_code,
     )
 
     total_plans = query.count()
@@ -73,6 +73,66 @@ def calculate_maintenance_completion_rate(db: Session, date_str: str, station_co
     completed_plans = query.filter(MaintenancePlan.status == "completed").count()
 
     return round(completed_plans / total_plans * 100, 2)
+
+
+def count_arrived_vehicles(db: Session, date_str: str, station_code: str) -> int:
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    next_day = date_obj + timedelta(days=1)
+
+    return (
+        db.query(Vehicle)
+        .filter(
+            Vehicle.arrived_at >= date_obj,
+            Vehicle.arrived_at < next_day,
+            Vehicle.station_code == station_code,
+        )
+        .count()
+    )
+
+
+def count_departed_vehicles(db: Session, date_str: str, station_code: str) -> int:
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    next_day = date_obj + timedelta(days=1)
+
+    return (
+        db.query(Vehicle)
+        .filter(
+            Vehicle.departed_at >= date_obj,
+            Vehicle.departed_at < next_day,
+            Vehicle.station_code == station_code,
+        )
+        .count()
+    )
+
+
+def count_maintenance_plans(db: Session, date_str: str, station_code: str) -> int:
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    next_day = date_obj + timedelta(days=1)
+
+    return (
+        db.query(MaintenancePlan)
+        .filter(
+            MaintenancePlan.created_at >= date_obj,
+            MaintenancePlan.created_at < next_day,
+            MaintenancePlan.station_code == station_code,
+        )
+        .count()
+    )
+
+
+def count_containers(db: Session, date_str: str, station_code: str) -> int:
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    next_day = date_obj + timedelta(days=1)
+
+    return (
+        db.query(Container)
+        .filter(
+            Container.created_at >= date_obj,
+            Container.created_at < next_day,
+            Container.station_code == station_code,
+        )
+        .count()
+    )
 
 
 def generate_daily_report(db: Session, date_str: str = None, station_code: str = None) -> list:
@@ -102,43 +162,16 @@ def generate_daily_report(db: Session, date_str: str = None, station_code: str =
             reports.append(existing)
             continue
 
-        marshalling_efficiency = calculate_marshalling_efficiency(db, date_str, sc)
-        avg_stay_time = calculate_avg_stay_time(db, date_str, sc)
-        maintenance_completion_rate = calculate_maintenance_completion_rate(db, date_str, sc)
-
-        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-        next_day = date_obj + timedelta(days=1)
-
-        arrived_query = db.query(Vehicle).filter(
-            Vehicle.arrived_at >= date_obj,
-            Vehicle.arrived_at < next_day,
-        )
-
-        departed_query = db.query(Vehicle).filter(
-            Vehicle.departed_at >= date_obj,
-            Vehicle.departed_at < next_day,
-        )
-
-        maintenance_query = db.query(MaintenancePlan).filter(
-            MaintenancePlan.created_at >= date_obj,
-            MaintenancePlan.created_at < next_day,
-        )
-
-        container_query = db.query(Container).filter(
-            Container.created_at >= date_obj,
-            Container.created_at < next_day,
-        )
-
         report = OperationReport(
             report_date=date_str,
             station_code=sc,
-            marshalling_efficiency=marshalling_efficiency,
-            avg_stay_time=avg_stay_time,
-            maintenance_completion_rate=maintenance_completion_rate,
-            total_arrived=arrived_query.count(),
-            total_departed=departed_query.count(),
-            total_maintenance=maintenance_query.count(),
-            total_containers_handled=container_query.count(),
+            marshalling_efficiency=calculate_marshalling_efficiency(db, date_str, sc),
+            avg_stay_time=calculate_avg_stay_time(db, date_str, sc),
+            maintenance_completion_rate=calculate_maintenance_completion_rate(db, date_str, sc),
+            total_arrived=count_arrived_vehicles(db, date_str, sc),
+            total_departed=count_departed_vehicles(db, date_str, sc),
+            total_maintenance=count_maintenance_plans(db, date_str, sc),
+            total_containers_handled=count_containers(db, date_str, sc),
         )
         db.add(report)
         reports.append(report)
@@ -176,7 +209,7 @@ def get_reports(
         query = query.filter(OperationReport.report_date <= end_date)
     if station_code:
         query = query.filter(OperationReport.station_code == station_code)
-    return query.order_by(OperationReport.report_date.desc()).offset(skip).limit(limit).all()
+    return query.order_by(OperationReport.report_date.desc(), OperationReport.station_code).offset(skip).limit(limit).all()
 
 
 def export_reports(db: Session, request: ReportExportRequest) -> dict:
@@ -194,10 +227,11 @@ def export_reports(db: Session, request: ReportExportRequest) -> dict:
 
     csv_content = "\n".join(csv_rows)
 
+    filename_suffix = f"_{request.station_code}" if request.station_code else ""
     return {
         "success": True,
         "count": len(reports),
         "format": "csv",
         "content": csv_content,
-        "filename": f"operation_report_{request.start_date}_{request.end_date}.csv",
+        "filename": f"operation_report{filename_suffix}_{request.start_date}_{request.end_date}.csv",
     }

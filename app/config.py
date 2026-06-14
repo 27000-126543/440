@@ -8,6 +8,6 @@ PUSH_TASK_TIMEOUT_MINUTES = 60
 
 STATION_CAPACITY_DEFAULT = 200
 
-NOTIFICATION_ROLES = ["dispatcher", "shunter", "maintenance"]
+NOTIFICATION_ROLES = ["dispatcher", "shunter", "maintenance", "driver"]
 
 REPORT_GENERATION_HOUR = 0

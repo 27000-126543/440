@@ -12,7 +12,7 @@ from app.schemas.dispatch import (
     TrainDispatchCreate,
     BrakeTestRequest,
 )
-from app.services.notification_service import push_status_notification
+from app.services.notification_service import push_status_notification, push_dispatch_notification
 
 
 def generate_dispatch_no() -> str:
@@ -159,15 +159,13 @@ def issue_departure_command(db: Session, dispatch_id: int, driver: str) -> dict:
     db.commit()
     db.refresh(dispatch)
 
-    push_status_notification(
+    push_dispatch_notification(
         db,
-        title=f"发车指令 - {dispatch.train_no}",
-        content=f"列车 {dispatch.train_no} 已发车，司机：{driver}，发车时间：{dispatch.departure_time}",
-        notification_type="dispatch",
-        related_type="dispatch",
-        related_id=dispatch.id,
-        roles=["dispatcher", "shunter", "maintenance"],
-        priority="high",
+        train_no=dispatch.train_no,
+        driver=driver,
+        departure_time=dispatch.departure_time,
+        dispatch_no=dispatch.dispatch_no,
+        dispatch_id=dispatch.id,
     )
 
     return {"success": True, "dispatch": dispatch, "message": "发车指令已下发"}

@@ -39,6 +39,7 @@ class NotificationBase(BaseModel):
 
 class NotificationCreate(NotificationBase):
     recipient_id: Optional[int] = None
+    recipient_name: Optional[str] = None
     related_type: Optional[str] = None
     related_id: Optional[int] = None
 
@@ -46,6 +47,7 @@ class NotificationCreate(NotificationBase):
 class NotificationResponse(NotificationBase):
     id: int
     recipient_id: Optional[int] = None
+    recipient_name: Optional[str] = None
     related_type: Optional[str] = None
     related_id: Optional[int] = None
     is_read: bool
